@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>English → Korean Conversation Log</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <span class="eyebrow">NVIDIA NIM · LIVE TRANSLATION</span>
+          <h1>영어 대화를<br /><em>한글 기록으로.</em></h1>
+          <p class="intro">말하는 동안 영어 원문과 자연스러운 한국어 번역을 문장별 대화 기록으로 정리합니다.</p>
+        </div>
+        <div class="pipeline-badge"><span></span> WHISPER LARGE V3</div>
+      </header>
+
+      <section class="recorder card">
+        <div class="status-row">
+          <span id="statusDot" class="status-dot"></span>
+          <span id="statusText">녹음 준비 완료</span>
+          <span id="timer" class="timer">00:00</span>
+        </div>
+        <button id="recordButton" class="record-button" type="button" aria-label="녹음 시작">
+          <span class="record-icon"></span>
+          <span id="recordLabel">녹음 시작</span>
+        </button>
+        <p class="hint">3.5초 단위로 처리 · 마이크 권한이 필요합니다.</p>
+      </section>
+
+      <section id="historySection" class="history card" hidden>
+        <div class="section-heading">
+          <div>
+            <span class="eyebrow">CONVERSATION LOG</span>
+            <h2>대화 기록</h2>
+          </div>
+          <span id="rowCount" class="row-count">0개 문장</span>
+        </div>
+        <div id="history" class="conversation" aria-live="polite"></div>
+      </section>
+
+      <section id="downloads" class="downloads card" hidden>
+        <div>
+          <span class="eyebrow">SESSION COMPLETE</span>
+          <h2>기록 저장</h2>
+          <p>녹음 파일과 대화 텍스트를 내려받을 수 있습니다.</p>
+        </div>
+        <div class="download-actions">
+          <button id="downloadAudio" class="secondary-button" type="button">녹음 파일 저장</button>
+          <button id="downloadText" class="primary-button" type="button">텍스트 저장</button>
+        </div>
+      </section>
+
+      <div id="error" class="error" hidden></div>
+      <footer>Whisper Large v3 · NVIDIA NIM · Korean translation</footer>
+    </main>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>
+
