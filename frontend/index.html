@@ -27,7 +27,8 @@
           <span class="record-icon"></span>
           <span id="recordLabel">녹음 시작</span>
         </button>
-        <p class="hint">3.5초 단위로 처리 · 마이크 권한이 필요합니다.</p>
+        <button id="pauseButton" class="secondary-button pause-button" type="button" hidden>일시정지</button>
+        <p class="hint">8초 또는 문장 단위로 처리 · 무음은 전송하지 않습니다.</p>
       </section>
 
       <section id="historySection" class="history card" hidden>
@@ -59,4 +60,3 @@
     <script src="{{ url_for('static', filename='app.js') }}"></script>
   </body>
 </html>
-

@@ -1,5 +1,7 @@
 import os
+import re
 import sys
+import threading
 import wave
 import subprocess
 import tempfile
@@ -24,31 +26,65 @@ app = Flask(
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
 
+class NvidiaKeyPool:
+    """Load numbered keys and move to the next key after an API failure."""
+
+    def __init__(self):
+        numbered = []
+        pattern = re.compile(r"^NVIDIA_API_KEY_(\d+)$")
+        for name, value in os.environ.items():
+            match = pattern.match(name)
+            if match and value.strip():
+                numbered.append((int(match.group(1)), value.strip()))
+        numbered.sort(key=lambda item: item[0])
+        self.keys = [value for _, value in numbered]
+        if not self.keys:
+            legacy = os.getenv("NVIDIA_API_KEY") or os.getenv("NVIDIA_WHISPER_API")
+            if legacy:
+                self.keys = [legacy.strip()]
+        self.index = 0
+        self.lock = threading.Lock()
+
+    def current(self) -> str:
+        with self.lock:
+            return self.keys[self.index]
+
+    def rotate(self) -> str:
+        with self.lock:
+            self.index = (self.index + 1) % len(self.keys)
+            return self.keys[self.index]
+
+    def __len__(self):
+        return len(self.keys)
+
+
+key_pool = NvidiaKeyPool()
+
+
 def nvidia_api_key() -> str:
-    key = os.getenv("NVIDIA_API_KEY") or os.getenv("NVIDIA_WHISPER_API")
-    if not key:
-        raise RuntimeError("NVIDIA_API_KEY 또는 NVIDIA_WHISPER_API가 최상위 .env에 필요합니다.")
-    return key
+    if not key_pool:
+        raise RuntimeError("NVIDIA_API_KEY_1 같은 키 또는 NVIDIA_API_KEY가 최상위 .env에 필요합니다.")
+    return key_pool.current()
 
 
-@lru_cache(maxsize=1)
-def nvidia_client() -> OpenAI:
+@lru_cache(maxsize=16)
+def nvidia_client(api_key: str) -> OpenAI:
     return OpenAI(
-        api_key=nvidia_api_key(),
+        api_key=api_key,
         base_url=os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
         timeout=30,
-        max_retries=1,
+        max_retries=0,
     )
 
 
-@lru_cache(maxsize=1)
-def riva_service() -> riva.client.ASRService:
+@lru_cache(maxsize=16)
+def riva_service(api_key: str) -> riva.client.ASRService:
     auth = riva.client.Auth(
         uri=os.getenv("NVIDIA_WHISPER_GRPC_URI", "grpc.nvcf.nvidia.com:443"),
         use_ssl=True,
         metadata_args=[
             ["function-id", os.getenv("NVIDIA_WHISPER_FUNCTION_ID", "b702f636-f60c-4a3d-a6f4-f3568c13bd7d")],
-            ["authorization", f"Bearer {nvidia_api_key()}"],
+            ["authorization", f"Bearer {api_key}"],
         ],
     )
     return riva.client.ASRService(auth)
@@ -78,10 +114,20 @@ def transcribe_with_whisper(audio_path: str) -> str:
             audio_channel_count=1,
             sample_rate_hertz=16000,
         )
-        response = riva_service().offline_recognize(Path(wav_path).read_bytes(), config)
-        if not response.results or not response.results[0].alternatives:
-            return ""
-        return response.results[0].alternatives[0].transcript.strip()
+        audio_bytes = Path(wav_path).read_bytes()
+        last_error = None
+        for _ in range(len(key_pool)):
+            api_key = nvidia_api_key()
+            try:
+                response = riva_service(api_key).offline_recognize(audio_bytes, config)
+                if not response.results or not response.results[0].alternatives:
+                    return ""
+                return response.results[0].alternatives[0].transcript.strip()
+            except Exception as exc:
+                last_error = exc
+                app.logger.warning("Whisper API key failed; rotating key: %s", exc)
+                key_pool.rotate()
+        raise last_error
     finally:
         Path(wav_path).unlink(missing_ok=True)
 
@@ -102,24 +148,33 @@ def has_speech(wav_path: str) -> bool:
 
 
 def translate_to_korean(english_text: str) -> str:
-    response = nvidia_client().chat.completions.create(
-        model=os.getenv("NVIDIA_TRANSLATION_MODEL", "nvidia/nemotron-3-super-120b-a12b"),
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a professional English-to-Korean translator. "
-                    "Translate naturally and preserve the original sentence boundaries. "
-                    "Return only the Korean translation, with no explanation."
-                ),
-            },
-            {"role": "user", "content": english_text},
-        ],
-        temperature=0,
-        max_tokens=int(os.getenv("NVIDIA_TRANSLATION_MAX_TOKENS", "512")),
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-    )
-    return (response.choices[0].message.content or "").strip()
+    last_error = None
+    for _ in range(len(key_pool)):
+        api_key = nvidia_api_key()
+        try:
+            response = nvidia_client(api_key).chat.completions.create(
+                model=os.getenv("NVIDIA_TRANSLATION_MODEL", "nvidia/nemotron-3-super-120b-a12b"),
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a professional English-to-Korean translator. "
+                            "Translate naturally and preserve the original sentence boundaries. "
+                            "Return only the Korean translation, with no explanation."
+                        ),
+                    },
+                    {"role": "user", "content": english_text},
+                ],
+                temperature=0,
+                max_tokens=int(os.getenv("NVIDIA_TRANSLATION_MAX_TOKENS", "512")),
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
+            return (response.choices[0].message.content or "").strip()
+        except Exception as exc:
+            last_error = exc
+            app.logger.warning("Translation API key failed; rotating key: %s", exc)
+            key_pool.rotate()
+    raise last_error
 
 
 @app.get("/")

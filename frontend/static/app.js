@@ -9,9 +9,12 @@ const rowCount = document.querySelector('#rowCount');
 const downloads = document.querySelector('#downloads');
 const downloadAudio = document.querySelector('#downloadAudio');
 const downloadText = document.querySelector('#downloadText');
+const pauseButton = document.querySelector('#pauseButton');
 const errorBox = document.querySelector('#error');
 
-const SEGMENT_MS = 3500;
+// Longer chunks give Whisper enough context to finish a sentence and reduce
+// both transcription and translation requests. The final chunk is sent on stop.
+const SEGMENT_MS = 8000;
 let stream;
 let segmentRecorder;
 let masterRecorder;
@@ -19,12 +22,17 @@ let segmentTimer;
 let timerId;
 let startedAt = 0;
 let recording = false;
+let paused = false;
 let stopping = false;
 let segmentIndex = 0;
 let inFlight = 0;
 let rows = new Map();
 let masterChunks = [];
 let audioBlob = null;
+let segmentStartedAt = 0;
+let segmentRemainingMs = SEGMENT_MS;
+let pausedAt = 0;
+let pausedTotalMs = 0;
 
 function setStatus(text, active = false) {
   statusText.textContent = text;
@@ -37,7 +45,8 @@ function showError(message) {
 }
 
 function updateTimer() {
-  const seconds = Math.floor((Date.now() - startedAt) / 1000);
+  const nowPausedMs = paused ? Date.now() - pausedAt : 0;
+  const seconds = Math.floor((Date.now() - startedAt - pausedTotalMs - nowPausedMs) / 1000);
   timer.textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
@@ -98,15 +107,17 @@ async function sendSegment(blob, index, startedSeconds) {
 }
 
 function startSegment() {
-  if (!recording) return;
+  if (!recording || paused) return;
   segmentRecorder = new MediaRecorder(stream);
   const chunks = [];
   const currentIndex = segmentIndex++;
-  const startedSeconds = (Date.now() - startedAt) / 1000;
+  const startedSeconds = (Date.now() - startedAt - pausedTotalMs) / 1000;
+  segmentStartedAt = Date.now();
+  segmentRemainingMs = SEGMENT_MS;
   segmentRecorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
   segmentRecorder.onstop = () => {
     const blob = new Blob(chunks, { type: segmentRecorder.mimeType || 'audio/webm' });
-    if (recording) startSegment();
+    if (recording && !paused) startSegment();
     sendSegment(blob, currentIndex, startedSeconds);
   };
   segmentRecorder.start();
@@ -114,7 +125,7 @@ function startSegment() {
   renderHistory();
   segmentTimer = setTimeout(() => {
     if (segmentRecorder?.state === 'recording') segmentRecorder.stop();
-  }, SEGMENT_MS);
+  }, segmentRemainingMs);
 }
 
 async function startRecording() {
@@ -125,6 +136,9 @@ async function startRecording() {
   masterChunks = [];
   audioBlob = null;
   segmentIndex = 0;
+  paused = false;
+  pausedAt = 0;
+  pausedTotalMs = 0;
   stopping = false;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -140,6 +154,8 @@ async function startRecording() {
     timerId = setInterval(updateTimer, 250);
     startSegment();
     recordLabel.textContent = '녹음 종료';
+    pauseButton.hidden = false;
+    pauseButton.textContent = '일시정지';
     recordButton.classList.add('recording');
     setStatus('듣는 중… 문장별로 기록하는 중', true);
   } catch (_error) {
@@ -156,11 +172,36 @@ function stopRecording() {
   timer.textContent = '00:00';
   recordLabel.textContent = '녹음 시작';
   recordButton.classList.remove('recording');
+  pauseButton.hidden = true;
   if (segmentRecorder?.state === 'recording') segmentRecorder.stop();
   if (masterRecorder?.state === 'recording') masterRecorder.stop();
   stream?.getTracks().forEach((track) => track.stop());
   setStatus('마지막 문장을 처리 중입니다…');
   maybeFinish();
+}
+
+function togglePause() {
+  if (!recording || stopping) return;
+  if (!paused) {
+    paused = true;
+    pausedAt = Date.now();
+    segmentRemainingMs = Math.max(1000, SEGMENT_MS - (Date.now() - segmentStartedAt));
+    clearTimeout(segmentTimer);
+    segmentRecorder?.pause();
+    masterRecorder?.pause();
+    pauseButton.textContent = '재개';
+    setStatus('일시정지됨');
+    return;
+  }
+  pausedTotalMs += Date.now() - pausedAt;
+  paused = false;
+  segmentRecorder?.resume();
+  masterRecorder?.resume();
+  pauseButton.textContent = '일시정지';
+  setStatus('듣는 중… 문장별로 기록하는 중', true);
+  segmentTimer = setTimeout(() => {
+    if (segmentRecorder?.state === 'recording') segmentRecorder.stop();
+  }, segmentRemainingMs);
 }
 
 function formatTime(seconds) {
@@ -183,6 +224,8 @@ recordButton.addEventListener('click', () => {
   else if (!navigator.mediaDevices?.getUserMedia) showError('이 브라우저에서는 마이크 녹음을 사용할 수 없습니다.');
   else startRecording();
 });
+
+pauseButton.addEventListener('click', togglePause);
 
 downloadAudio.addEventListener('click', () => {
   if (audioBlob) download(`english-recording-${new Date().toISOString().slice(0, 10)}.webm`, audioBlob);
